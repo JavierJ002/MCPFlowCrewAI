@@ -1,0 +1,31 @@
+interpret_user_input:
+  description: >
+    Tomar la entrada inicial del usuario, que puede ser un apodo, un nombre mal escrito o ambiguo.
+    La entrada para esta tarea es: '{team_name}'.
+    Tu objetivo es procesar esta entrada y devolver únicamente el nombre canónico y oficial del equipo, sin ningun caracter especial,
+    todo en minusculas y sin signos de puntuacion.
+    Este paso es crucial para asegurar que el siguiente agente reciba datos limpios y precisos para su consulta.
+  expected_output: >
+    UNA ÚNICA CADENA DE TEXTO que contenga el nombre oficial y completo del equipo.
+    NO incluyas saludos, explicaciones ni ningún otro texto.
+    
+    Ejemplos de salida esperada:
+    - 'Bayern de Múnich'
+    - 'Manchester United'
+    - 'Internazionale'
+
+find_team_id_task:
+  description: >
+    Utilizando el nombre del equipo normalizado que se te ha proporcionado desde la tarea anterior,
+    tu única misión es interactuar con la base de datos para encontrar el ID numérico correspondiente.
+    Debes usar la herramienta de consulta SQL para ejecutar una búsqueda en la tabla 'teams'.
+    La consulta debe ser flexible (usando ILIKE) para maximizar las posibilidades de éxito.
+  expected_output: >
+    UNA ÚNICA CADENA DE TEXTO que contenga exclusivamente el ID numérico del equipo encontrado.
+    Si el equipo no se encuentra en la base de datos, devuelve la cadena de texto 'ID_NOT_FOUND'.
+    Este formato estricto es vital para el procesamiento automático posterior.
+    
+    Ejemplos de salida esperada:
+    - '2829'
+    - '451'
+    - 'ID_NOT_FOUND'
