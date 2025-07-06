@@ -16,16 +16,26 @@ interpret_user_input:
 
 find_team_id_task:
   description: >
-    Utilizando el nombre del equipo normalizado que se te ha proporcionado desde la tarea anterior,
-    tu única misión es interactuar con la base de datos para encontrar el ID numérico correspondiente.
-    Debes usar la herramienta de consulta SQL para ejecutar una búsqueda en la tabla 'teams'.
-    La consulta debe ser flexible (usando ILIKE) para maximizar las posibilidades de éxito.
-  expected_output: >
-    UNA ÚNICA CADENA DE TEXTO que contenga exclusivamente el ID numérico del equipo encontrado.
-    Si el equipo no se encuentra en la base de datos, devuelve la cadena de texto 'ID_NOT_FOUND'.
-    Este formato estricto es vital para el procesamiento automático posterior.
+    Tu único objetivo es encontrar el ID numérico de un equipo a partir de su nombre normalizado, que recibirás de la tarea anterior.
     
-    Ejemplos de salida esperada:
-    - '2829'
-    - '451'
-    - 'ID_NOT_FOUND'
+    Para lograrlo, DEBES usar la herramienta `psql_find_team_id_by_name`.
+    
+    Pasa el nombre del equipo que recibiste como el argumento `team_name` a la herramienta. La herramienta se encargará de toda la lógica de búsqueda.
+  expected_output: >
+    Una única cadena de texto que contenga el ID numérico del equipo.
+    Si la herramienta devuelve un error o no encuentra un ID, devuelve la cadena 'ID_NOT_FOUND'.
+    
+    Ejemplo de salida esperada: '49'
+
+
+generate_matches_report:
+  description: >
+    Tu tarea es generar un informe CSV con los últimos partidos de un equipo.
+    Recibirás dos parámetros: 'team_id' y 'num_matches'.
+    
+    Debes usar la herramienta `psql_get_last_matches` para realizar esta acción.
+    Pasa los parámetros recibidos directamente a la herramienta.
+  expected_output: >
+    La ruta absoluta del archivo CSV generado.
+    
+    Ejemplo de salida esperada: '/app/reports/ultimos_partidos_49_20231027_103000.csv'

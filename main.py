@@ -1,13 +1,18 @@
 import os
+import csv
 import yaml
+from datetime import datetime, timezone
+from langchain.tools import Tool
 from crewai import Agent, Task, Crew, Flow, LLM
-from crewai.flow.flow import start, listen, start, and_, or_
+from crewai.flow.flow import start, listen, and_, or_
+from crewai_tools import tools
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from crewai_tools.adapters.mcp_adapter import MCPServerAdapter
 from mcp import StdioServerParameters
+
 
 # Cargar variables de entorno
 load_dotenv()
@@ -51,7 +56,12 @@ class InterpretacionExpertoComentarista(BaseModel):
     team_name: str = Field(..., description="Nombre del equipo referido por el usuario")
 
 class ExtraccionIDTeam(BaseModel):
-    team_id: str = Field(..., description="Identificador único del equipo escogido por el usuario")
+    """Modelo para la extracción del ID de equipo, que maneja tanto éxito como fracaso."""
+    team_id: Optional[str] = Field(None, description="Identificador único del equipo si se encuentra.")
+    error: Optional[str] = Field(None, description="Mensaje de error si no se pudo encontrar el ID del equipo.")
+
+class ExtraccionNPartidos(BaseModel):
+    path_file: str = Field(..., description="Direccion del archivo .csv creado")
 
 # Crear servidor MCP
 server_env = {**os.environ}
@@ -63,8 +73,9 @@ server_params = StdioServerParameters(
     env=server_env
 )
 
+
 # Clase Flow principal
-class ExtraerIDEquipoFlow(Flow):
+class ExtraerInfoEquipoFlow(Flow):
     @start()
     def iniciar_flujo(self):
         team_name = self.state["team_name"]
@@ -96,36 +107,78 @@ class ExtraerIDEquipoFlow(Flow):
                 output_pydantic=ExtraccionIDTeam
             )
 
-            crew = Crew(
-                agents=[comentarista, extractor],
-                tasks=[interpretar_tarea, extraer_tarea],
-                verbose=True
-            )
+            crew = Crew(agents=[comentarista, extractor], tasks=[interpretar_tarea, extraer_tarea], verbose=True)
+            crew_output = crew.kickoff(inputs={"team_name": team_name, "DATABASE_SCHEMA_CONTEXT": DATABASE_SCHEMA_CONTEXT})
+            
+            output_tarea = crew_output
+            print('DEBUG4')
+            print(output_tarea['team_id'])
+            print(output_tarea['error'])
 
-            resultado = crew.kickoff(inputs={"team_name": team_name, "DATABASE_SCHEMA_CONTEXT": DATABASE_SCHEMA_CONTEXT})
-            self.state["team_id"] = resultado
-            from datetime import datetime, timezone
-            now_utc = datetime.now(timezone.utc)
-            return resultado, now_utc
-    
+            if output_tarea['error'] == 'null' or output_tarea['error'] == 'None':
+                self.state['team_id'] = 'ID_NOT_FOUND'
+                return self
+
+            self.state['team_id'] = output_tarea['team_id']
+            return self
+
     @listen(iniciar_flujo)
-    def ejecutar_query(self, resultado, now_utc):
-        pass
+    def get_last_matches_listener(self):
+        print(f"\n--- Iniciando listener para obtener últimos partidos con ID: {self.state['team_id']} ---")
 
+        if not self.state['team_id'] or self.state['team_id'] == 'ID_NOT_FOUND' or not self.state['team_id'].isdigit():
+            error_msg = f"ID de equipo inválido ('{self.state['team_id']}') recibido. No se pueden obtener los partidos."
+            print(error_msg)
+            self.state["last_matches_csv_path"] = error_msg
+            return error_msg
+        
+        # El objeto MCPServerAdapter es en sí mismo la colección de herramientas.
+        with MCPServerAdapter(serverparams=server_params) as mcp_tools:
+            # CORRECCIÓN: Se pasa el objeto mcp_tools directamente. No tiene un método .get_tools().
+            ejecutor_basedatos = Agent(config=agente_info_team["query_executor"], tools=mcp_tools, llm=llm)
+            obtener_partidos_task = Task(config=tareas_info_team["generate_matches_report"], agent=ejecutor_basedatos)
+            partidos_crew = Crew(agents=[ejecutor_basedatos], tasks = [obtener_partidos_task], verbose=True)
+
+            print('EJECUTANDO EXTRACCIÓN DE PARTIDOS!!!')
+            inputs_listener = {"team_id": self.state['team_id'], "num_matches": self.state.get("num_matches", 5)}
+            filepath = partidos_crew.kickoff(inputs=inputs_listener)
+            
+            self.state['last_matches_csv_path'] = filepath
+            return self
         
 
 
-
-# Ejecutar desde línea de comandos
 if __name__ == "__main__":
-    print("=== Búsqueda de ID de Equipo ===")
+    print("=== Búsqueda de Últimos Partidos Jugados ===")
     nombre_equipo = input("Introduce el nombre del equipo: ").strip()
-
 
     if not nombre_equipo:
         print("Nombre no válido. Finalizando.")
     else:
-        flujo = ExtraerIDEquipoFlow()
-        resultado = flujo.kickoff(inputs={"team_name": nombre_equipo})
-        print("\n--- Resultado ---")
-        print(f"ID del equipo para '{nombre_equipo}': {resultado}")
+        flujo = ExtraerInfoEquipoFlow()
+        # Puedes pasar parámetros iniciales al estado del flujo
+        initial_state = {"team_name": nombre_equipo, "num_matches": 5}
+        resultado_final_estado = flujo.kickoff(inputs=initial_state)
+        
+        
+        print("\n--- Flujo Completado ---")
+        
+        
+        team_id_result = flujo.state['team_id']
+        print(f'DEBUG11: {team_id_result}')
+        report_path_result = flujo.state["last_matches_csv_path"]
+        print(f'DEBUG11: {report_path_result}')
+        # --- FIN DE CAMBIOS ---
+
+        if team_id_result and team_id_result != "ID_NOT_FOUND":
+            print(f"ID del equipo encontrado: {team_id_result}")
+        else:
+            print("No se pudo determinar el ID del equipo.")
+
+        if report_path_result:
+            if isinstance(report_path_result, str) and ("Error" in report_path_result or "inválido" in report_path_result or "ID_NOT_FOUND" in report_path_result):
+                 print(f"Error al generar el reporte: {report_path_result}")
+            else:
+                 print(f"Reporte de últimos partidos generado en: {report_path_result}")
+        else:
+            print("No se generó el reporte de últimos partidos.")

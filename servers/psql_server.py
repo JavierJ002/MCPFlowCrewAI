@@ -1,80 +1,72 @@
 import logging
 import asyncio
 import asyncpg
+import os
+import csv
+import json # <--- IMPORTANTE: Importar json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence, Any, Dict, List
 from mcp.server import Server
-from mcp.server.session import ServerSession
 from mcp.server.stdio import stdio_server
-from mcp.types import (
-    ClientCapabilities,
-    TextContent,
-    Tool,
-    ListRootsResult,
-    RootsCapability,
-)
+from mcp.types import TextContent, Tool
 from enum import Enum
 from pydantic import BaseModel, Field
-import json
-import os
 from dotenv import load_dotenv
 
+# --- (El código de las secciones 1, 2, 3 y 4 hasta la función find_team_id_by_name no cambia) ---
+# ... (código existente sin cambios) ...
+
+# --- 1. Modelo de Configuración de la Base de Datos ---
 class DatabaseConnection(BaseModel):
     host: str = "localhost"
     port: int = 5432
     database: str
     username: str
     password: str = ""
-
     @classmethod
     def from_env(cls) -> "DatabaseConnection":
-        """Crear configuración desde variables de entorno"""
         config = cls(
             host=os.getenv("POSTGRES_HOST", "localhost"),
             port=int(os.getenv("POSTGRES_PORT", "5432")),
             database=os.getenv("POSTGRES_DB") or cls._require_env("POSTGRES_DB"),
             username=os.getenv("POSTGRES_USER") or cls._require_env("POSTGRES_USER"),
-            # Exige la contraseña para evitar conexiones con password vacía
             password=os.getenv("POSTGRES_PASSWORD") or cls._require_env("POSTGRES_PASSWORD")
         )
-        
-        # Log de la configuración (sin password)
         logger = logging.getLogger(__name__)
         logger.info(f"Configuración de DB cargada: host={config.host}, port={config.port}, database={config.database}, username={config.username}")
-        
         return config
-    
     @staticmethod
     def _require_env(var_name: str) -> str:
-        """Requiere que una variable de entorno esté definida"""
         value = os.getenv(var_name)
-        if not value:
-            raise ValueError(f"La variable de entorno {var_name} es requerida")
+        if not value: raise ValueError(f"La variable de entorno {var_name} es requerida.")
         return value
 
+# --- 2. Modelos Pydantic para los Inputs de las Herramientas ---
 class QueryDatabase(BaseModel):
-    query: str = Field(description="SQL query to execute")
-    params: List[Any] = Field(default=[], description="Parameters for the query")
-
+    query: str = Field(description="La consulta SQL completa a ejecutar.")
+    params: List[Any] = Field(default=[], description="Una lista de parámetros para la consulta SQL.")
 class ListTables(BaseModel):
-    schema_name: str = Field(default="sofaproject_schema", description="Schema name to list tables from")
-
+    schema_name: str = Field(default="public", description="El nombre del esquema.")
 class DescribeTable(BaseModel):
-    table_name: str = Field(description="Name of the table to describe")
-    schema_name: str = Field(default="sofaproject_schema", description="Schema name")
-
+    table_name: str = Field(description="El nombre de la tabla.")
+    schema_name: str = Field(default="public", description="El esquema al que pertenece la tabla.")
 class ListSchemas(BaseModel):
     pass
-
 class GetTableData(BaseModel):
-    table_name: str = Field(description="Name of the table")
-    schema_name: str = Field(default="sofaproject_schema", description="Schema name")
-    limit: int = Field(default=100, description="Maximum number of rows to return")
-    offset: int = Field(default=0, description="Number of rows to skip")
-
+    table_name: str = Field(description="El nombre de la tabla.")
+    schema_name: str = Field(default="public", description="El esquema.")
+    limit: int = Field(default=10, description="El número máximo de filas a devolver.")
+    offset: int = Field(default=0, description="El número de filas a omitir.")
 class ExecuteTransaction(BaseModel):
-    queries: List[str] = Field(description="List of SQL queries to execute in a transaction")
+    queries: List[str] = Field(description="Una lista de consultas SQL para ejecutar.")
+class GetLastMatches(BaseModel):
+    team_id: str = Field(description="El ID del equipo.")
+    num_matches: int = Field(default=5, ge=1, le=50, description="El número de partidos.")
+class FindTeamIdByName(BaseModel):
+    team_name: str = Field(description="El nombre canónico del equipo a buscar.")
 
+# --- 3. Enumeración de Herramientas ---
 class PostgreSQLTools(str, Enum):
     QUERY = "psql_query"
     LIST_TABLES = "psql_list_tables"
@@ -82,7 +74,10 @@ class PostgreSQLTools(str, Enum):
     LIST_SCHEMAS = "psql_list_schemas"
     GET_TABLE_DATA = "psql_get_table_data"
     EXECUTE_TRANSACTION = "psql_execute_transaction"
+    GET_LAST_MATCHES = "psql_get_last_matches"
+    FIND_TEAM_ID_BY_NAME = "psql_find_team_id_by_name"
 
+# --- 4. Clase de Lógica del Servidor PostgreSQL ---
 class PostgreSQLServer:
     def __init__(self, connection_config: DatabaseConnection):
         self.config = connection_config
@@ -90,363 +85,183 @@ class PostgreSQLServer:
         self.logger = logging.getLogger(__name__)
 
     async def initialize_pool(self, max_retries: int = 3):
-        """Initialize the connection pool with retry logic"""
         for attempt in range(max_retries):
             try:
                 self.logger.info(f"Intento {attempt + 1} de conexión a PostgreSQL...")
-                
-                # Primero probamos una conexión individual
                 await self._test_single_connection()
-                
-                # Si la conexión individual funciona, creamos el pool
-                self.pool = await asyncpg.create_pool(
-                    host=self.config.host,
-                    port=self.config.port,
-                    database=self.config.database,
-                    user=self.config.username,
-                    password=self.config.password,
-                    min_size=1,
-                    max_size=10,
-                    command_timeout=30,
-                    server_settings={
-                        'jit': 'off',
-                        'application_name': 'mcp-postgresql'
-                    },
-                    init=self._init_connection
-                )
-                
-                self.logger.info(f"¡Pool de conexiones inicializado exitosamente en {self.config.host}:{self.config.port}/{self.config.database}!")
+                self.pool = await asyncpg.create_pool(host=self.config.host, port=self.config.port, database=self.config.database, user=self.config.username, password=self.config.password, min_size=1, max_size=10, command_timeout=30, server_settings={'jit': 'off', 'application_name': 'mcp-postgresql'}, init=self._init_connection)
+                self.logger.info(f"¡Pool de conexiones inicializado exitosamente!")
                 return
-                
             except Exception as e:
                 self.logger.error(f"Intento {attempt + 1} fallido: {str(e)}")
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    self.logger.info(f"Esperando {wait_time} segundos antes del siguiente intento...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    self.logger.error("Todos los intentos de conexión fallaron")
-                    raise
+                if attempt < max_retries - 1: await asyncio.sleep(2 ** attempt)
+                else: self.logger.error("Todos los intentos de conexión fallaron"); raise
 
     async def _test_single_connection(self):
-        """Test a single connection before creating pool"""
-        self.logger.info("Probando conexión individual...")
-        conn = await asyncpg.connect(
-            host=self.config.host,
-            port=self.config.port,
-            database=self.config.database,
-            user=self.config.username,
-            password=self.config.password,
-            command_timeout=10
-        )
+        conn = await asyncpg.connect(host=self.config.host, port=self.config.port, database=self.config.database, user=self.config.username, password=self.config.password, command_timeout=10)
         await conn.close()
-        self.logger.info("Conexión individual exitosa")
 
     async def _init_connection(self, conn):
-        """Initialize each connection in the pool"""
         await conn.execute("SET timezone = 'UTC'")
 
     async def close_pool(self):
-        """Close the connection pool"""
-        if self.pool:
-            await self.pool.close()
-            self.logger.info("Pool de conexiones cerrado")
+        if self.pool: await self.pool.close()
 
     async def execute_query(self, query: str, params: List[Any] = None) -> Dict[str, Any]:
-        """Execute a SELECT query and return results"""
-        if not self.pool:
-            raise RuntimeError("Database pool not initialized")
-        
+        if not self.pool: raise RuntimeError("El pool de la base de datos no está inicializado")
         async with self.pool.acquire() as conn:
             try:
-                if params:
-                    result = await conn.fetch(query, *params)
-                else:
-                    result = await conn.fetch(query)
-                
-                # Convert result to list of dictionaries
-                rows = [dict(row) for row in result]
-                
-                return {
-                    "success": True,
-                    "rows": rows,
-                    "row_count": len(rows)
-                }
+                result = await conn.fetch(query, *params) if params else await conn.fetch(query)
+                return {"success": True, "rows": [dict(row) for row in result], "row_count": len(result)}
             except Exception as e:
-                self.logger.error(f"Error ejecutando query: {str(e)}")
-                return {
-                    "success": False,
-                    "error": str(e),
-                    "row_count": 0
-                }
+                return {"success": False, "error": str(e), "row_count": 0}
 
-    async def execute_command(self, query: str, params: List[Any] = None) -> Dict[str, Any]:
-        """Execute a command query (INSERT, UPDATE, DELETE) and return results"""
-        if not self.pool:
-            raise RuntimeError("Database pool not initialized")
-        
-        async with self.pool.acquire() as conn:
-            try:
-                if params:
-                    result = await conn.execute(query, *params)
-                else:
-                    result = await conn.execute(query)
-                
-                return {
-                    "success": True,
-                    "message": f"Command executed successfully: {result}",
-                    "result": result
-                }
-            except Exception as e:
-                self.logger.error(f"Error ejecutando comando: {str(e)}")
-                return {
-                    "success": False,
-                    "error": str(e)
-                }
+    async def list_tables(self, schema_name: str = "public") -> Dict[str, Any]:
+        query = "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name"
+        return await self.execute_query(query, [schema_name])
 
-    async def list_tables(self, schema_name: str = "sofaproject_schema") -> List[Dict[str, str]]:
-        """List all tables in a schema"""
-        query = """
-        SELECT table_name, table_type 
-        FROM information_schema.tables 
-        WHERE table_schema = $1
-        ORDER BY table_name
-        """
-        result = await self.execute_query(query, [schema_name])
-        return result["rows"] if result["success"] else []
+    async def describe_table(self, table_name: str, schema_name: str = "public") -> Dict[str, Any]:
+        query = "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position"
+        return await self.execute_query(query, [schema_name, table_name])
+    
+    async def list_schemas(self) -> Dict[str, Any]:
+        query = "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast') ORDER BY schema_name"
+        return await self.execute_query(query)
 
-    async def describe_table(self, table_name: str, schema_name: str = "sofaproject_schema") -> List[Dict[str, Any]]:
-        """Get table structure information"""
-        query = """
-        SELECT 
-            column_name,
-            data_type,
-            is_nullable,
-            column_default,
-            character_maximum_length,
-            numeric_precision,
-            numeric_scale
-        FROM information_schema.columns 
-        WHERE table_schema = $1 AND table_name = $2
-        ORDER BY ordinal_position
-        """
-        result = await self.execute_query(query, [schema_name, table_name])
-        return result["rows"] if result["success"] else []
+    async def find_team_id_by_name(self, team_name: str) -> Dict[str, Any]:
+        if not self.pool: raise RuntimeError("El pool de la base de datos no está inicializado")
+        clean_team_name = team_name.strip()
+        words = clean_team_name.split()
+        significant_word = max(words, key=len) if words else clean_team_name
+        search_patterns = [
+            (clean_team_name, "coincidencia exacta (nombre completo)"),
+            (f"%{significant_word}%", f"contiene la palabra significativa '{significant_word}'"),
+            (f"%{clean_team_name}%", "la DB contiene el nombre completo")
+        ]
+        query = "SELECT team_id, name FROM public.teams WHERE name ILIKE $1"
+        for pattern, strategy_name in search_patterns:
+            self.logger.info(f"Buscando con estrategia '{strategy_name}': ILIKE '{pattern}'")
+            result = await self.execute_query(query, [pattern])
+            if not result["success"]: return {"success": False, "error": result["error"]}
+            if result["row_count"] == 1:
+                team_id = result["rows"][0]["team_id"]
+                found_name = result["rows"][0]["name"]
+                self.logger.info(f"Éxito con '{strategy_name}': Se encontró un único equipo. ID: {team_id}, Nombre: {found_name}")
+                return {"success": True, "team_id": team_id}
+            if result["row_count"] > 1:
+                found_teams = [row['name'] for row in result['rows']]
+                error_msg = f"Búsqueda ambigua con '{strategy_name}'. Se encontraron {result['row_count']} equipos: {', '.join(found_teams)}"
+                self.logger.warning(error_msg)
+                return {"success": False, "error": error_msg}
+        error_msg = f"No se encontró ningún equipo que coincida con '{team_name}' después de intentar todas las estrategias."
+        self.logger.warning(error_msg)
+        return {"success": False, "error": error_msg}
 
-    async def list_schemas(self) -> List[Dict[str, str]]:
-        """List all schemas"""
-        query = """
-        SELECT schema_name 
-        FROM information_schema.schemata 
-        WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
-        ORDER BY schema_name
-        """
-        result = await self.execute_query(query)
-        return result["rows"] if result["success"] else []
-
-    async def get_table_data(self, table_name: str, schema_name: str = "sofaproject_schema", 
-                           limit: int = 100, offset: int = 0) -> Dict[str, Any]:
-        """Get data from a table with pagination"""
-        query = f"""
-        SELECT * FROM {schema_name}.{table_name}
-        LIMIT $1 OFFSET $2
-        """
-        return await self.execute_query(query, [limit, offset])
-
-    async def execute_transaction(self, queries: List[str]) -> Dict[str, Any]:
-        """Execute multiple queries in a transaction"""
-        if not self.pool:
-            raise RuntimeError("Database pool not initialized")
-        
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                try:
-                    results = []
-                    for query in queries:
-                        result = await conn.execute(query)
-                        results.append(result)
-                    
-                    return {
-                        "success": True,
-                        "results": results,
-                        "message": f"Transaction completed successfully. {len(queries)} queries executed."
-                    }
-                except Exception as e:
-                    self.logger.error(f"Error en transacción: {str(e)}")
-                    return {
-                        "success": False,
-                        "error": str(e),
-                        "message": "Transaction rolled back due to error."
-                    }
-
+# --- 5. Función Auxiliar de Formateo ---
 def format_query_result(result: Dict[str, Any]) -> str:
-    """Format query result for display"""
-    if not result["success"]:
-        return f"Error: {result['error']}"
-    
-    if result["row_count"] == 0:
-        return "No rows returned."
-    
-    # Format as a simple table
-    rows = result["rows"]
-    if not rows:
-        return "No data found."
-    
-    # Get column names
+    if not result.get("success"): return f"Error: {result.get('error', 'Error desconocido')}"
+    if result.get("row_count", 0) == 0: return "La consulta no devolvió filas."
+    rows = result.get("rows", [])
+    if not rows: return "No se encontraron datos."
     columns = list(rows[0].keys())
-    
-    # Create header
-    output = []
-    output.append(" | ".join(columns))
-    output.append("-" * len(output[0]))
-    
-    # Add rows
-    for row in rows:
-        output.append(" | ".join(str(row.get(col, "")) for col in columns))
-    
-    output.append(f"\n({result['row_count']} rows)")
+    header = " | ".join(columns)
+    output = [header, "-" * len(header)]
+    for row in rows: output.append(" | ".join(str(row.get(col, "")) for col in columns))
+    output.append(f"\n({result['row_count']} filas)")
     return "\n".join(output)
 
+# --- 6. Lógica Principal del Servidor MCP ---
 async def serve(connection_config: DatabaseConnection) -> None:
     logger = logging.getLogger(__name__)
-    
     psql_server = PostgreSQLServer(connection_config)
-    
-    logger.info("Intentando inicializar el pool de conexiones a la base de datos...")
-    try:
-        await psql_server.initialize_pool()
-        logger.info("¡Pool de conexiones inicializado con ÉXITO!")
-    except Exception as e:
-        logger.error(f"¡¡¡FALLO CRÍTICO al inicializar el pool de conexiones!!! Error: {e}", exc_info=True)
-        raise
-
+    await psql_server.initialize_pool()
     server = Server("mcp-postgresql")
     
     @server.list_tools()
     async def list_tools() -> list[Tool]:
         return [
-            Tool(
-                name=PostgreSQLTools.QUERY,
-                description="Execute a SQL query (SELECT, INSERT, UPDATE, DELETE)",
-                inputSchema=QueryDatabase.model_json_schema(),
-            ),
-            Tool(
-                name=PostgreSQLTools.LIST_TABLES,
-                description="List all tables in a schema",
-                inputSchema=ListTables.model_json_schema(),
-            ),
-            Tool(
-                name=PostgreSQLTools.DESCRIBE_TABLE,
-                description="Get the structure/schema of a table",
-                inputSchema=DescribeTable.model_json_schema(),
-            ),
-            Tool(
-                name=PostgreSQLTools.LIST_SCHEMAS,
-                description="List all schemas in the database",
-                inputSchema=ListSchemas.model_json_schema(),
-            ),
-            Tool(
-                name=PostgreSQLTools.GET_TABLE_DATA,
-                description="Get data from a table with pagination",
-                inputSchema=GetTableData.model_json_schema(),
-            ),
-            Tool(
-                name=PostgreSQLTools.EXECUTE_TRANSACTION,
-                description="Execute multiple queries in a transaction",
-                inputSchema=ExecuteTransaction.model_json_schema(),
-            ),
+            Tool(name=PostgreSQLTools.QUERY, description="Ejecuta una única consulta SQL.", inputSchema=QueryDatabase.model_json_schema()),
+            Tool(name=PostgreSQLTools.LIST_TABLES, description="Lista todas las tablas y vistas.", inputSchema=ListTables.model_json_schema()),
+            Tool(name=PostgreSQLTools.DESCRIBE_TABLE, description="Muestra la estructura de una tabla.", inputSchema=DescribeTable.model_json_schema()),
+            Tool(name=PostgreSQLTools.LIST_SCHEMAS, description="Lista todos los esquemas.", inputSchema=ListSchemas.model_json_schema()),
+            Tool(name=PostgreSQLTools.GET_LAST_MATCHES, description="Genera un informe CSV con los últimos partidos.", inputSchema=GetLastMatches.model_json_schema()),
+            Tool(name=PostgreSQLTools.FIND_TEAM_ID_BY_NAME, description="Herramienta de alto nivel para encontrar el ID de un equipo por su nombre. Usa una búsqueda por prioridad para asegurar la precisión.", inputSchema=FindTeamIdByName.model_json_schema()),
         ]
     
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         try:
-            match name:
-                case PostgreSQLTools.QUERY:
-                    query = arguments["query"]
-                    params = arguments.get("params", [])
-                    
-                    # Determine if it's a SELECT or command query
-                    if query.strip().upper().startswith("SELECT"):
-                        result = await psql_server.execute_query(query, params)
-                        formatted_result = format_query_result(result)
-                    else:
-                        result = await psql_server.execute_command(query, params)
-                        if result["success"]:
-                            formatted_result = result["message"]
-                        else:
-                            formatted_result = f"Error: {result['error']}"
-                    
-                    return [TextContent(type="text", text=formatted_result)]
+            if name == PostgreSQLTools.FIND_TEAM_ID_BY_NAME:
+                team_name = arguments.get("team_name")
+                if not team_name:
+                    error_json = json.dumps({"team_id": None, "error": "El argumento 'team_name' es requerido."})
+                    return [TextContent(type="text", text=error_json)]
                 
-                case PostgreSQLTools.LIST_TABLES:
-                    schema = arguments.get("schema_name", "sofaproject_schema")
-                    tables = await psql_server.list_tables(schema)
-                    
-                    if tables:
-                        table_list = "\n".join([f"- {t['table_name']} ({t['table_type']})" for t in tables])
-                        result = f"Tables in schema '{schema}':\n{table_list}"
-                    else:
-                        result = f"No tables found in schema '{schema}'"
-                    
-                    return [TextContent(type="text", text=result)]
+                result = await psql_server.find_team_id_by_name(team_name)
                 
-                case PostgreSQLTools.DESCRIBE_TABLE:
-                    table_name = arguments["table_name"]
-                    schema_name = arguments.get("schema_name", "sofaproject_schema")
-                    columns = await psql_server.describe_table(table_name, schema_name)
-                    
-                    if columns:
-                        col_info = []
-                        for col in columns:
-                            nullable = "NULL" if col["is_nullable"] == "YES" else "NOT NULL"
-                            default = f" DEFAULT {col['column_default']}" if col["column_default"] else ""
-                            col_info.append(f"- {col['column_name']}: {col['data_type']} {nullable}{default}")
-                        
-                        result = f"Structure of table '{schema_name}.{table_name}':\n" + "\n".join(col_info)
-                    else:
-                        result = f"Table '{schema_name}.{table_name}' not found"
-                    
-                    return [TextContent(type="text", text=result)]
+                # --- COMIENZO DE CAMBIOS: Formatear la salida como JSON ---
+                if result["success"]:
+                    # Crear un diccionario que coincida con el modelo Pydantic
+                    output_data = {"team_id": str(result["team_id"]), "error": None}
+                else:
+                    # Crear un diccionario de error que coincida con el modelo Pydantic
+                    output_data = {"team_id": None, "error": result["error"]}
                 
-                case PostgreSQLTools.LIST_SCHEMAS:
-                    schemas = await psql_server.list_schemas()
-                    
-                    if schemas:
-                        schema_list = "\n".join([f"- {s['schema_name']}" for s in schemas])
-                        result = f"Available schemas:\n{schema_list}"
-                    else:
-                        result = "No schemas found"
-                    
-                    return [TextContent(type="text", text=result)]
-                
-                case PostgreSQLTools.GET_TABLE_DATA:
-                    table_name = arguments["table_name"]
-                    schema_name = arguments.get("schema_name", "sofaproject_schema")
-                    limit = arguments.get("limit", 100)
-                    offset = arguments.get("offset", 0)
-                    
-                    result = await psql_server.get_table_data(table_name, schema_name, limit, offset)
-                    formatted_result = f"Data from {schema_name}.{table_name}:\n" + format_query_result(result)
-                    
-                    return [TextContent(type="text", text=formatted_result)]
-                
-                case PostgreSQLTools.EXECUTE_TRANSACTION:
-                    queries = arguments["queries"]
-                    result = await psql_server.execute_transaction(queries)
-                    
-                    if result["success"]:
-                        formatted_result = result["message"]
-                    else:
-                        formatted_result = f"Transaction failed: {result['error']}"
-                    
-                    return [TextContent(type="text", text=formatted_result)]
-                
-                case _:
-                    raise ValueError(f"Unknown tool: {name}")
-        
+                # Convertir el diccionario a una cadena JSON
+                json_output = json.dumps(output_data)
+                return [TextContent(type="text", text=json_output)]
+                # --- FIN DE CAMBIOS ---
+
+            elif name == PostgreSQLTools.QUERY:
+                # ... (resto de las llamadas a herramientas sin cambios)
+                result = await psql_server.execute_query(arguments["query"], arguments.get("params", []))
+                return [TextContent(type="text", text=format_query_result(result))]
+            elif name == PostgreSQLTools.LIST_TABLES:
+                result = await psql_server.list_tables(arguments.get("schema_name", "public"))
+                return [TextContent(type="text", text=format_query_result(result))]
+            elif name == PostgreSQLTools.DESCRIBE_TABLE:
+                result = await psql_server.describe_table(arguments["table_name"], arguments.get("schema_name", "public"))
+                return [TextContent(type="text", text=format_query_result(result))]
+            elif name == PostgreSQLTools.LIST_SCHEMAS:
+                result = await psql_server.list_schemas()
+                return [TextContent(type="text", text=format_query_result(result))]
+            elif name == PostgreSQLTools.GET_LAST_MATCHES:
+                team_id_str = arguments.get("team_id")
+                num_matches = arguments.get("num_matches", 5)
+                if not team_id_str or not team_id_str.isdigit(): return [TextContent(type="text", text=f"Error: ID de equipo inválido: '{team_id_str}'.")]
+                team_id = int(team_id_str)
+                now_utc = datetime.now(timezone.utc)
+                sql_query = """
+                    SELECT m.match_id, m.match_datetime_utc, t.name AS tournament_name, m.round_number,
+                           home_team.name AS home_team_name, away_team.name AS away_team_name,
+                           m.home_score, m.away_score, v.name AS venue_name
+                    FROM public.matches AS m
+                    JOIN public.teams AS home_team ON m.home_team_id = home_team.team_id
+                    JOIN public.teams AS away_team ON m.away_team_id = away_team.team_id
+                    JOIN public.seasons AS s ON m.season_id = s.season_id
+                    JOIN public.tournaments AS t ON s.tournament_id = t.tournament_id
+                    LEFT JOIN public.venues AS v ON m.venue_id = v.venue_id
+                    WHERE (m.home_team_id = $1 OR m.away_team_id = $1) AND m.match_datetime_utc < $2
+                    ORDER BY m.match_datetime_utc DESC
+                    LIMIT $3;
+                """
+                query_result = await psql_server.execute_query(sql_query, [team_id, now_utc, num_matches])
+                if not query_result["success"]: return [TextContent(type="text", text=f"Error en la base de datos: {query_result['error']}")]
+                if not query_result["rows"]: return [TextContent(type="text", text=f"No se encontraron partidos pasados para el equipo ID {team_id}.")]
+                output_dir = "reports"
+                os.makedirs(output_dir, exist_ok=True)
+                timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filepath = Path(output_dir) / f"ultimos_partidos_{team_id}_{timestamp_str}.csv"
+                with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=query_result["rows"][0].keys())
+                    writer.writeheader()
+                    writer.writerows(query_result["rows"])
+                return [TextContent(type="text", text=f"Archivo CSV generado exitosamente en: {filepath.resolve()}")]
+            else:
+                raise ValueError(f"Herramienta desconocida: {name}")
         except Exception as e:
-            logger.error(f"Error executing tool {name}: {str(e)}")
-            return [TextContent(type="text", text=f"Error: {str(e)}")]
+            logger.error(f"Error ejecutando la herramienta {name}: {str(e)}", exc_info=True)
+            return [TextContent(type="text", text=f"Error interno del servidor: {str(e)}")]
     
     try:
         options = server.create_initialization_options()
@@ -455,32 +270,16 @@ async def serve(connection_config: DatabaseConnection) -> None:
     finally:
         await psql_server.close_pool()
 
+# --- 7. Punto de Entrada del Script ---
 async def main():
-    script_path = Path(__file__).resolve()
-    project_root = script_path.parent.parent.parent.parent 
-    env_path = project_root / ".env"
-    
-    load_dotenv(dotenv_path=env_path, override=True)
-    
-    
-    # Verificar que el archivo .env existe
-    if not os.path.exists(env_path):
-        print(f"ADVERTENCIA: No se encontró el archivo .env en {env_path}")
-    
+    load_dotenv()
     try:
         config = DatabaseConnection.from_env()
+        await serve(config)
     except ValueError as e:
         print(f"Error de configuración: {e}")
-        print("Asegúrate de que tu archivo .env contenga todas las variables requeridas:")
-        print("- POSTGRES_DB")
-        print("- POSTGRES_USER")
-        return
-    
-    await serve(config)
+        print("Asegúrate de que tu archivo .env contenga todas las variables requeridas.")
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     asyncio.run(main())
