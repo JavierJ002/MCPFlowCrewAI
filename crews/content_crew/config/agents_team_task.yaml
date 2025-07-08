@@ -1,3 +1,4 @@
+#agents_team_task.yaml
 interpret_user_input:
   description: >
     Tomar la entrada inicial del usuario, que puede ser un apodo, un nombre mal escrito o ambiguo.
@@ -17,25 +18,27 @@ interpret_user_input:
 find_team_id_task:
   description: >
     Tu único objetivo es encontrar el ID numérico de un equipo a partir de su nombre normalizado, que recibirás de la tarea anterior.
-    
     Para lograrlo, DEBES usar la herramienta `psql_find_team_id_by_name`.
-    
     Pasa el nombre del equipo que recibiste como el argumento `team_name` a la herramienta. La herramienta se encargará de toda la lógica de búsqueda.
   expected_output: >
     Una única cadena de texto que contenga el ID numérico del equipo.
     Si la herramienta devuelve un error o no encuentra un ID, devuelve la cadena 'ID_NOT_FOUND'.
     
-    Ejemplo de salida esperada: '49'
-
-
 generate_matches_report:
   description: >
-    Tu tarea es generar un informe CSV con los últimos partidos de un equipo.
-    Recibirás dos parámetros: 'team_id' y 'num_matches'.
+    Tu tarea es generar un informe CSV con los últimos partidos de un equipo, utilizando un ID de equipo específico.
+    El ID del equipo que debes usar es: '{team_id}'.
+    El número de partidos a recuperar es: '{num_matches}'.
     
-    Debes usar la herramienta `psql_get_last_matches` para realizar esta acción.
-    Pasa los parámetros recibidos directamente a la herramienta.
+    DEBES usar la herramienta `psql_get_last_matches` para realizar esta acción.
+    Pasa el ID del equipo y el número de partidos directamente a los argumentos correspondientes de la herramienta.
   expected_output: >
     La ruta absoluta del archivo CSV generado.
-    
-    Ejemplo de salida esperada: '/app/reports/ultimos_partidos_49_20231027_103000.csv'
+    Ejemplo de salida esperada: '/app/reports/ultimos_partidos_20231027_103000.csv'
+
+find_rival_task: 
+  description: >
+    "Busca en internet 'próximo partido de {team_name}' o 'siguiente rival de {team_name}'.
+    Identifica claramente al equipo oponente y devuelve únicamente su nombre."
+  expected_output: >
+    "El nombre del equipo rival. Por ejemplo: 'Real Madrid'."
