@@ -1,4 +1,4 @@
-#agents_team_task.yaml
+#agents_Team_task.yaml
 interpret_user_input:
   description: >
     Tomar la entrada inicial del usuario, que puede ser un apodo, un nombre mal escrito o ambiguo.
@@ -17,9 +17,10 @@ interpret_user_input:
 
 find_team_id_task:
   description: >
-    Tu único objetivo es encontrar el ID numérico de un equipo a partir de su nombre normalizado, que recibirás de la tarea anterior.
+    Tu único objetivo es encontrar el ID numérico de un equipo a partir de su nombre normalizado.
+    El nombre del equipo a buscar es: '{team_name}'.
     Para lograrlo, DEBES usar la herramienta `psql_find_team_id_by_name`.
-    Pasa el nombre del equipo que recibiste como el argumento `team_name` a la herramienta. La herramienta se encargará de toda la lógica de búsqueda.
+    Pasa el nombre del equipo como el argumento `team_name` a la herramienta.
   expected_output: >
     Una única cadena de texto que contenga el ID numérico del equipo.
     Si la herramienta devuelve un error o no encuentra un ID, devuelve la cadena 'ID_NOT_FOUND'.
@@ -38,7 +39,8 @@ generate_matches_report:
 
 find_rival_task: 
   description: >
-    "Busca en internet 'próximo partido de {team_name}' o 'siguiente rival de {team_name}'.
-    Identifica claramente al equipo oponente y devuelve únicamente su nombre."
+    Usa tus herramientas de búsqueda para encontrar el próximo rival del equipo: '{team_name}'.
+    Realiza una búsqueda como 'próximo partido de {team_name}' o 'siguiente rival de {team_name}'.
+    Identifica claramente al equipo oponente y devuelve únicamente su nombre oficial.
   expected_output: >
-    "El nombre del equipo rival. Por ejemplo: 'Real Madrid'."
+    El nombre del equipo rival. Por ejemplo: 'Real Madrid'.

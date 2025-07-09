@@ -7,12 +7,12 @@ from crewai import Agent, Task, Crew, Flow, LLM
 from crewai.flow.flow import start, listen, and_, or_
 from crewai_tools import tools
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from crewai_tools.adapters.mcp_adapter import MCPServerAdapter
 from mcp import StdioServerParameters
-#from langchain_community.ddgs.tools import DuckDuckGoSearch
+from tools.custom_tool import MyCustomDuckDuckGoTool
 
 
 # Cargar variables de entorno
@@ -64,6 +64,9 @@ class ExtraccionIDTeam(BaseModel):
 class ExtraccionNPartidos(BaseModel):
     path_file: str = Field(..., description="Direccion del archivo .csv creado")
 
+class RivalName(BaseModel):
+    rival_name: str = Field(..., description="Nombre del equipo rival encontrado.")
+
 # Crear servidor MCP
 server_env = {**os.environ}
 server_env["PYTHONUTF8"] = "1"
@@ -74,13 +77,28 @@ server_params = StdioServerParameters(
     env=server_env
 )
 
+def _create_find_id_crew(mcp_tools: List[Tool], interpretar_tarea: Task = None) -> Crew:
+    """Crea y devuelve un Crew configurado para encontrar el ID de un equipo."""
+    extractor = Agent(config=agente_info_team["database_analyst"], tools=mcp_tools, llm=llm)
+    find_id_task = Task(
+        config=tareas_info_team["find_team_id_task"],
+        agent=extractor,
+        #context = [interpretar_tarea], 
+        output_pydantic=ExtraccionIDTeam
+    )
+    return Crew(agents=[extractor], tasks=[find_id_task], verbose=True)
+
+def _create_generate_report_crew(mcp_tools: List[Tool]) -> Crew:
+    """Crea y devuelve un Crew configurado para generar un informe de partidos."""
+    executor = Agent(config=agente_info_team["query_executor"], tools=mcp_tools, llm=llm)
+    generate_report_task = Task(config=tareas_info_team["generate_matches_report"], agent=executor)
+    return Crew(agents=[executor], tasks=[generate_report_task], verbose=True)
 
 # Clase Flow principal
 class ExtraerInfoEquipoFlow(Flow):
     @start()
     def iniciar_flujo(self):
-        team_name = self.state["team_name"]
-
+        team_name_inicial = self.state["team_name"]
         # Iniciar adaptador MCP
         with MCPServerAdapter(serverparams=server_params) as mcp_tools:
             print(f"Herramientas MCP disponibles: {[tool.name for tool in mcp_tools]}")
@@ -88,31 +106,23 @@ class ExtraerInfoEquipoFlow(Flow):
             # Crear agentes
             comentarista = Agent(config=agente_info_team["football_comentator"],
                                  llm = llm)
-            extractor = Agent(
-                config=agente_info_team["database_analyst"],
-                tools=mcp_tools,
-                llm=llm
-            )
-
-            # Crear tareas
+           
             interpretar_tarea = Task(
                 config=tareas_info_team["interpret_user_input"],
                 agent=comentarista,
                 output_pydantic=InterpretacionExpertoComentarista
             )
 
-            extraer_tarea = Task(
-                config=tareas_info_team["find_team_id_task"],
-                agent=extractor,
-                context=[interpretar_tarea],
-                output_pydantic=ExtraccionIDTeam
-            )
+            #find_id_crew = _create_find_id_crew(mcp_tools, interpretar_tarea)
+            find_id_crew = _create_find_id_crew(mcp_tools)
 
-            crew = Crew(agents=[comentarista, extractor], tasks=[interpretar_tarea, extraer_tarea], verbose=True)
-            crew_output = crew.kickoff(inputs={"team_name": team_name, "DATABASE_SCHEMA_CONTEXT": DATABASE_SCHEMA_CONTEXT})
-            
+            crew = Crew(agents=[comentarista, find_id_crew.agents[0]], tasks=[interpretar_tarea, find_id_crew.tasks[0]], verbose=True)
+            crew_output = crew.kickoff(inputs={"team_name": team_name_inicial, "DATABASE_SCHEMA_CONTEXT": DATABASE_SCHEMA_CONTEXT})
             output_tarea = crew_output
+            #self.state["team_name"] = crew_output["team_name"]
             print('DEBUG4')
+            print(crew_output)
+            print(self.state['team_name'])  ##ESTA LINEA DEBERIA SER EL OUTPUT DEL INTERPRETAR TAREA, EN MI CASO Barcelona en lugar de Barca
             print(output_tarea['team_id'])
             print(output_tarea['error'])
 
@@ -135,19 +145,46 @@ class ExtraerInfoEquipoFlow(Flow):
         
         # El objeto MCPServerAdapter es en sí mismo la colección de herramientas.
         with MCPServerAdapter(serverparams=server_params) as mcp_tools:
-            # CORRECCIÓN: Se pasa el objeto mcp_tools directamente. No tiene un método .get_tools().
-            ejecutor_basedatos = Agent(config=agente_info_team["query_executor"], tools=mcp_tools, llm=llm)
-            obtener_partidos_task = Task(config=tareas_info_team["generate_matches_report"], agent=ejecutor_basedatos)
-            partidos_crew = Crew(agents=[ejecutor_basedatos], tasks = [obtener_partidos_task], verbose=True)
-
+            report_crew = _create_generate_report_crew(mcp_tools)
             print('EJECUTANDO EXTRACCIÓN DE PARTIDOS!!!')
             inputs_listener = {"team_id": self.state['team_id'], "num_matches": self.state.get("num_matches", 5)}
-            filepath = partidos_crew.kickoff(inputs=inputs_listener)
+            filepath = report_crew.kickoff(inputs=inputs_listener)
             
             self.state['last_matches_csv_path'] = filepath
             return self
+    
+    @listen(get_last_matches_listener)
+    def find_rival_and_its_id_listener(self):
+        original_team_name = self.state['team_name']
+        if not original_team_name:
+            print("\n--- [Rival] No hay nombre de equipo normalizado para buscar rival. Omitiendo.")
+            self.state['rival_id'] = 'ID_NOT_FOUND'
+            return
         
+        print(f"\n--- [Rival] Buscando próximo rival de: {original_team_name} ---")
+        search_tool = MyCustomDuckDuckGoTool()
+        scout = Agent(config=agente_info_team["rival_scout"], tools=[search_tool], llm=llm)
+        find_rival_task = Task(config=tareas_info_team["find_rival_task"], agent=scout, output_pydantic=RivalName)
+        rival_crew = Crew(agents=[scout], tasks=[find_rival_task], verbose=True)
+        rival_name_output = rival_crew.kickoff(inputs={"team_name": original_team_name})
 
+        self.state["rival_name"] = rival_name_output["rival_name"]
+
+        if not self.state["rival_name"]:
+            print(f"--- [Rival] No se pudo encontrar un rival para {original_team_name}. ---")
+            self.state['rival_id'] = 'ID_NOT_FOUND'
+            return
+
+        print(f'DEBUG: RIVAL ENCONTRADO: {self.state["rival_name"]}, BUSCANDO ID....')
+        with MCPServerAdapter(serverparams=server_params) as mcp_tools:
+            find_id_crew = _create_find_id_crew(mcp_tools)
+            id_output = find_id_crew.kickoff(inputs={"team_name": self.state["rival_name"], "DATABASE_SCHEMA_CONTEXT": DATABASE_SCHEMA_CONTEXT})
+            self.state["rival_id"] = id_output["team_id"]
+
+            if not self.state["rival_id"]:
+                self.state['rival_id'] = 'ID_NOT_FOUND'
+
+        return self
 
 if __name__ == "__main__":
     print("=== Búsqueda de Últimos Partidos Jugados ===")
@@ -157,6 +194,7 @@ if __name__ == "__main__":
         print("Nombre no válido. Finalizando.")
     else:
         flujo = ExtraerInfoEquipoFlow()
+        print(flujo)
         # Puedes pasar parámetros iniciales al estado del flujo
         initial_state = {"team_name": nombre_equipo, "num_matches": 5}
         resultado_final_estado = flujo.kickoff(inputs=initial_state)
@@ -183,3 +221,7 @@ if __name__ == "__main__":
                  print(f"Reporte de últimos partidos generado en: {report_path_result}")
         else:
             print("No se generó el reporte de últimos partidos.")
+
+        print("\n--- Resultados para el Equipo Rival ---")
+        rival_id = flujo.state["rival_id"]
+        print(f"El rival_id es: {rival_id}")
