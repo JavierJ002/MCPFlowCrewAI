@@ -1,5 +1,6 @@
 from crewai.tools import BaseTool
 from langchain_community.tools import DuckDuckGoSearchRun
+from datetime import datetime
 
 class MyCustomDuckDuckGoTool(BaseTool):
     name: str = "DuckDuckGo Search Tool"
@@ -9,3 +10,4 @@ class MyCustomDuckDuckGoTool(BaseTool):
         duckduckgo_tool = DuckDuckGoSearchRun()
         response = duckduckgo_tool.invoke(query)
         return response
+    

@@ -37,10 +37,22 @@ generate_matches_report:
     La ruta absoluta del archivo CSV generado.
     Ejemplo de salida esperada: '/app/reports/ultimos_partidos_20231027_103000.csv'
 
-find_rival_task: 
+find_rival_task:
   description: >
-    Usa tus herramientas de búsqueda para encontrar el próximo rival del equipo: '{team_name}'.
-    Realiza una búsqueda como 'próximo partido de {team_name}' o 'siguiente rival de {team_name}'.
-    Identifica claramente al equipo oponente y devuelve únicamente su nombre oficial.
+    Utiliza tus herramientas de búsqueda para encontrar el próximo rival del equipo: '{team_name}'.
+    
+    Es importante que solo tengas en cuenta partidos de la **liga nacional oficial** en la que participa el equipo.
+    No consideres partidos amistosos, de copas nacionales como la Copa del Rey o FA Cup, ni competiciones internacionales como la Champions League o Europa League.
+
+    Realiza búsquedas como:
+    - "cuándo vuelve a jugar {team_name} en liga despues de {fecha}"
+
+    Ten en cuenta que actualmente los equipos pueden estar en período de descanso o pretemporada.
+    Por tanto, el próximo partido de liga puede ser en varias semanas o meses (por ejemplo, en agosto si están en parón de verano).
+
+    Tu tarea es identificar el primer partido de **liga oficial** posterior a la fecha {fecha}, sin importar cuán lejano esté.
+
+    Devuelve únicamente el nombre oficial del equipo rival en ese partido, sin explicación adicional, sin la fecha, sin adornos.
+
   expected_output: >
-    El nombre del equipo rival. Por ejemplo: 'Real Madrid'.
+    El nombre oficial del equipo rival. Por ejemplo: 'Real Madrid' o 'Manchester United'.

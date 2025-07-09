@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from crewai_tools.adapters.mcp_adapter import MCPServerAdapter
 from mcp import StdioServerParameters
 from tools.custom_tool import MyCustomDuckDuckGoTool
+from datetime import datetime
 
 
 # Cargar variables de entorno
@@ -23,6 +24,14 @@ llm = LLM(
     model="gemini/gemini-2.0-flash",
     verbose=True,
     temperature=0.65,
+    google_api_key=os.getenv("GEMINI_API_KEY")
+)
+
+
+llm2 = LLM(
+    model="gemini/gemini-2.0-flash",
+    verbose=True,
+    temperature=0.01,
     google_api_key=os.getenv("GEMINI_API_KEY")
 )
 
@@ -163,10 +172,11 @@ class ExtraerInfoEquipoFlow(Flow):
         
         print(f"\n--- [Rival] Buscando próximo rival de: {original_team_name} ---")
         search_tool = MyCustomDuckDuckGoTool()
-        scout = Agent(config=agente_info_team["rival_scout"], tools=[search_tool], llm=llm)
+        scout = Agent(config=agente_info_team["rival_scout"], tools=[search_tool], llm=llm2)
         find_rival_task = Task(config=tareas_info_team["find_rival_task"], agent=scout, output_pydantic=RivalName)
         rival_crew = Crew(agents=[scout], tasks=[find_rival_task], verbose=True)
-        rival_name_output = rival_crew.kickoff(inputs={"team_name": original_team_name})
+        fecha_actual = datetime.now().strftime("%Y-%m-%d")
+        rival_name_output = rival_crew.kickoff(inputs={"team_name": original_team_name, "fecha": fecha_actual})
 
         self.state["rival_name"] = rival_name_output["rival_name"]
 
