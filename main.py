@@ -4,7 +4,7 @@ import yaml
 from datetime import datetime, timezone
 from langchain.tools import Tool
 from crewai import Agent, Task, Crew, Flow, LLM
-from crewai.flow.flow import start, listen, and_, or_
+from crewai.flow.flow import start, listen, and_, or_, router
 from crewai_tools import tools
 from pathlib import Path
 from typing import Dict, Optional, List
@@ -137,7 +137,6 @@ class ExtraerInfoEquipoFlow(Flow):
 
             if output_tarea['error'] == 'null' or output_tarea['error'] == 'None':
                 self.state['team_id'] = 'ID_NOT_FOUND'
-                return self
 
             self.state['team_id'] = output_tarea['team_id']
             return self
@@ -163,38 +162,54 @@ class ExtraerInfoEquipoFlow(Flow):
             return self
     
     @listen(get_last_matches_listener)
-    def find_rival_and_its_id_listener(self):
-        original_team_name = self.state['team_name']
-        if not original_team_name:
-            print("\n--- [Rival] No hay nombre de equipo normalizado para buscar rival. Omitiendo.")
-            self.state['rival_id'] = 'ID_NOT_FOUND'
-            return
-        
-        print(f"\n--- [Rival] Buscando próximo rival de: {original_team_name} ---")
-        search_tool = MyCustomDuckDuckGoTool()
-        scout = Agent(config=agente_info_team["rival_scout"], tools=[search_tool], llm=llm2)
-        find_rival_task = Task(config=tareas_info_team["find_rival_task"], agent=scout, output_pydantic=RivalName)
-        rival_crew = Crew(agents=[scout], tasks=[find_rival_task], verbose=True)
-        fecha_actual = datetime.now().strftime("%Y-%m-%d")
-        rival_name_output = rival_crew.kickoff(inputs={"team_name": original_team_name, "fecha": fecha_actual})
-
-        self.state["rival_name"] = rival_name_output["rival_name"]
-
-        if not self.state["rival_name"]:
-            print(f"--- [Rival] No se pudo encontrar un rival para {original_team_name}. ---")
-            self.state['rival_id'] = 'ID_NOT_FOUND'
-            return
-
-        print(f'DEBUG: RIVAL ENCONTRADO: {self.state["rival_name"]}, BUSCANDO ID....')
+    def encontrar_rival_input_user(self):
+        rival_team_name = input(f'Ingresa el nombre del rival a comparar para el equipo: {self.state["team_name"]}:')
         with MCPServerAdapter(serverparams=server_params) as mcp_tools:
+            print(f"Herramientas MCP disponibles: {[tool.name for tool in mcp_tools]}")
+
+            # Crear agentes
+            comentarista = Agent(config=agente_info_team["football_comentator"],
+                                 llm = llm)
+           
+            interpretar_tarea = Task(
+                config=tareas_info_team["interpret_user_input"],
+                agent=comentarista,
+                output_pydantic=InterpretacionExpertoComentarista
+            )
+
+            #find_id_crew = _create_find_id_crew(mcp_tools, interpretar_tarea)
             find_id_crew = _create_find_id_crew(mcp_tools)
-            id_output = find_id_crew.kickoff(inputs={"team_name": self.state["rival_name"], "DATABASE_SCHEMA_CONTEXT": DATABASE_SCHEMA_CONTEXT})
-            self.state["rival_id"] = id_output["team_id"]
 
-            if not self.state["rival_id"]:
-                self.state['rival_id'] = 'ID_NOT_FOUND'
+            crew = Crew(agents=[comentarista, find_id_crew.agents[0]], tasks=[interpretar_tarea, find_id_crew.tasks[0]], verbose=True)
+            crew_output = crew.kickoff(inputs={"team_name": rival_team_name, "DATABASE_SCHEMA_CONTEXT": DATABASE_SCHEMA_CONTEXT})
+            output_tarea = crew_output
 
-        return self
+            print('DEBUG5')
+            print(crew_output)
+            
+
+            self.state["error_rival"] = output_tarea['error']
+            self.state["rival_id"] = output_tarea['team_id']
+            self.state['nombre_rival'] = rival_team_name
+
+            print(f"\n--- Iniciando listener para obtener últimos partidos del Rival con ID: {self.state['rival_id']} ---")
+
+            with MCPServerAdapter(serverparams=server_params) as mcp_tools:
+                report_crew = _create_generate_report_crew(mcp_tools)
+                print('EJECUTANDO EXTRACCIÓN DE PARTIDOS!!!')
+                inputs_listener = {"team_id": self.state['rival_id'], "num_matches": self.state.get("num_matches", 5)}
+                filepath = report_crew.kickoff(inputs=inputs_listener)
+                
+                self.state['last_matches_rival_csv_path'] = filepath
+                return self
+        
+
+
+
+
+
+        
+
 
 if __name__ == "__main__":
     print("=== Búsqueda de Últimos Partidos Jugados ===")
@@ -235,3 +250,7 @@ if __name__ == "__main__":
         print("\n--- Resultados para el Equipo Rival ---")
         rival_id = flujo.state["rival_id"]
         print(f"El rival_id es: {rival_id}")
+
+        rival_report_path_result = flujo.state["last_matches_rival_csv_path"]
+        print(f'Direccion reporte de juegos del rival últimos 5 partidos: {rival_report_path_result}')
+        print(rival_report_path_result)
