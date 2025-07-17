@@ -231,20 +231,117 @@ async def serve(connection_config: DatabaseConnection) -> None:
                 if not team_id_str or not team_id_str.isdigit(): return [TextContent(type="text", text=f"Error: ID de equipo inválido: '{team_id_str}'.")]
                 team_id = int(team_id_str)
                 now_utc = datetime.now(timezone.utc)
+                #==================================================================================================
                 sql_query = """
-                    SELECT m.match_id, m.match_datetime_utc, t.name AS tournament_name, m.round_number,
-                           home_team.name AS home_team_name, away_team.name AS away_team_name,
-                           m.home_score, m.away_score, v.name AS venue_name
+                    SELECT 
+                        m.match_id,
+                        m.match_datetime_utc,
+                        t.name AS tournament_name,
+                        m.round_number,
+                        home_team.name AS home_team_name,
+                        away_team.name AS away_team_name,
+                        m.home_score,
+                        m.away_score,
+                        v.name AS venue_name,
+                        v.city_name AS venue_city,
+                        r.name AS referee_name,
+                        m.attendance,
+                        
+
+                        CASE 
+                            WHEN m.home_team_id = $1 THEN 'HOME'
+                            ELSE 'AWAY'
+                        END AS team_role,
+                        
+
+                        CASE 
+                            WHEN m.home_team_id = $1 THEN m.home_score
+                            ELSE m.away_score
+                        END AS team_score,
+                        
+
+                        CASE 
+                            WHEN m.home_team_id = $1 THEN m.away_score
+                            ELSE m.home_score
+                        END AS opponent_score,
+                        
+
+                        CASE 
+                            WHEN (m.home_team_id = $1 AND m.home_score > m.away_score) OR 
+                                (m.away_team_id = $1 AND m.away_score > m.home_score) THEN 'WIN'
+                            WHEN m.home_score = m.away_score THEN 'DRAW'
+                            ELSE 'LOSS'
+                        END AS match_result,
+                        
+
+                        tms.possession_percentage,
+                        tms.total_shots,
+                        tms.shots_on_target,
+                        tms.shots_off_target,
+                        tms.blocked_shots,
+                        tms.big_chances,
+                        tms.big_chances_scored,
+                        tms.big_chances_missed,
+                        tms.corners,
+                        tms.fouls,
+                        tms.yellow_cards,
+                        tms.red_cards,
+                        tms.passes_total,
+                        tms.passes_successful,
+                        tms.passes_percentage,
+                        tms.tackles_total,
+                        tms.tackles_successful,
+                        tms.interceptions,
+                        tms.clearances,
+                        tms.expected_goals,
+                        
+
+                        tms.formation,
+                        tms.average_team_rating,
+                        
+
+                        pms_top.scorers AS top_scorers,
+                        pms_top.assisters AS top_assisters,
+                        pms_top.ratings AS top_ratings
+
                     FROM public.matches AS m
                     JOIN public.teams AS home_team ON m.home_team_id = home_team.team_id
                     JOIN public.teams AS away_team ON m.away_team_id = away_team.team_id
                     JOIN public.seasons AS s ON m.season_id = s.season_id
                     JOIN public.tournaments AS t ON s.tournament_id = t.tournament_id
                     LEFT JOIN public.venues AS v ON m.venue_id = v.venue_id
-                    WHERE (m.home_team_id = $1 OR m.away_team_id = $1) AND m.match_datetime_utc < $2
+                    LEFT JOIN public.referees AS r ON m.referee_id = r.referee_id
+
+                    JOIN public.team_match_stats AS tms ON m.match_id = tms.match_id 
+                        AND tms.team_id = $1
+                        AND tms.period = 'ALL'
+
+                    LEFT JOIN LATERAL (
+                        SELECT 
+                            STRING_AGG(p.name || ' (' || pms.goals || ')', ', ' ORDER BY pms.goals DESC) AS scorers,
+                            STRING_AGG(p.name || ' (' || pms.assists || ')', ', ' ORDER BY pms.assists DESC) AS assisters,
+                            STRING_AGG(p.name || ' (' || ROUND(pms.sofascore_rating::numeric, 1) || ')', ', ' ORDER BY pms.sofascore_rating DESC) AS ratings
+                        FROM (
+                            SELECT pms_inner.*, p_inner.name
+                            FROM public.player_match_stats pms_inner
+                            JOIN public.players p_inner ON pms_inner.player_id = p_inner.player_id
+                            WHERE pms_inner.match_id = m.match_id 
+                                AND pms_inner.team_id = $1
+                                AND pms_inner.minutes_played > 0
+                            ORDER BY pms_inner.sofascore_rating DESC
+                            LIMIT 5
+                        ) AS pms
+                        JOIN public.players p ON pms.player_id = p.player_id
+                    ) pms_top ON TRUE
+
+                    WHERE (m.home_team_id = $1 OR m.away_team_id = $1) 
+                        AND m.match_datetime_utc < $2
+                        AND m.home_score IS NOT NULL 
+                        AND m.away_score IS NOT NULL
                     ORDER BY m.match_datetime_utc DESC
                     LIMIT $3;
                 """
+                #==================================================================================================
                 query_result = await psql_server.execute_query(sql_query, [team_id, now_utc, num_matches])
                 if not query_result["success"]: return [TextContent(type="text", text=f"Error en la base de datos: {query_result['error']}")]
                 if not query_result["rows"]: return [TextContent(type="text", text=f"No se encontraron partidos pasados para el equipo ID {team_id}.")]
@@ -270,7 +367,7 @@ async def serve(connection_config: DatabaseConnection) -> None:
     finally:
         await psql_server.close_pool()
 
-# --- 7. Punto de Entrada del Script ---
+
 async def main():
     load_dotenv()
     try:
